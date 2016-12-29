@@ -32,6 +32,7 @@ int main(int argc , char *argv[])
   struct sockaddr_in server, client, proxyclient;
   struct sockaddr_storage orig_dst;
   char message[BUFFER];
+  char *teardown;
   char oldip[] = "10.1.1.32"; // zu ersetzende interne IP
   char newip[] = "109.205.200.75"; // öffentliche IP
 
@@ -88,6 +89,7 @@ int main(int argc , char *argv[])
     proxyclient.sin_addr.s_addr = inet_addr(orig_dst_str);
     proxyclient.sin_family = AF_INET;
     proxyclient.sin_port = htons(554);
+
     // zu original ziel connecten
     if(connect(proxysocket, (struct sockaddr *)&proxyclient, sizeof(proxyclient)))
     {
@@ -125,7 +127,16 @@ int main(int argc , char *argv[])
       // ready zum lesen
       while(i = recv(new_socket, message, sizeof(message),0)) //empfangen
       {
-        puts("get message:");
+        if (i==0)
+        {
+          puts("disconnected");
+          close(proxysocket);
+          break;
+        }
+
+        teardown = strstr(message,"TEARDOWN");
+
+        puts("get message from tvbox:");
 
         message[i] = '\0';
         puts(message);
@@ -134,23 +145,42 @@ int main(int argc , char *argv[])
 
         if(send(proxysocket, message, strlen(message), 0) < 0) //zum orignal ziel senden
         {
-          puts("fehler");
+          puts("fehler"); close(proxysocket); break;
         }
+
+        printf("Send message to dst server: \r\n%s\r\n", message);
+
         message[0] = '\0';
+        puts("get message from dst server:");
 
-        recv(proxysocket, message, sizeof(message),0); //antwort vom ziel empfangen
+        if (recv(proxysocket, message, sizeof(message),0) < 0) //antwort vom ziel empfangen
+        {
+          puts("disconnected");
+          close(proxysocket);
+          break;
+        }
 
-        printf("Send message: \r\n%s\r\n", message);
+        puts(message);
 
         if(send(new_socket, message, strlen(message), 0) < 0) //zur tv box zurück senden
         {
-          puts("fehler");
+          puts("fehler"); close(proxysocket); break;
         }
+        puts("send message to tv box: ");
+        puts(message);
+        message[0] = '\0';
+        if(teardown != NULL)
+        {
+          puts("TEARDOWN, shutting down");
+          break;
+        }
+        teardown = NULL;
       }
     }
-  }
 
   close(proxysocket);
+  }
+
   close(new_socket);
   return 0;
 }
