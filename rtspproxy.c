@@ -15,16 +15,25 @@ für IP_TRANSPARENT siehe https://www.kernel.org/doc/Documentation/networking/tp
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <syslog.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <signal.h>
 
+#define BANNER "RTSPProxy Daemon 0.2 alpha1"
 #define BACKLOG 10
 #define PROXYPORT 5540
 #define IP_TRANSPARENT 19
 #define BUFFER 2000
 
 char orig_dst_str[INET_ADDRSTRLEN]; //Originale Ziel IP
+typedef void (*sighandler_t)(int);
+int debug = 0;
 
 int get_org_dstaddr(int sockfd, struct sockaddr_storage *orig_dst);
 char * stringReplace(char *search, char *replace, char *string);
+static sighandler_t handle_signal(int sig_nr, sighandler_t signalhandler);
+static void start_daemon(const char *log_name, int facility);
 
 int main(int argc , char *argv[])
 {
@@ -36,10 +45,14 @@ int main(int argc , char *argv[])
   char oldip[] = "10.1.1.32"; // zu ersetzende interne IP
   char newip[] = "109.205.200.75"; // öffentliche IP
 
+  start_daemon("RTSPProxy", LOG_LOCAL0);
+
+  syslog(LOG_NOTICE, "%s started (written by Stefan Mueller)", BANNER);
+
   socket_desc = socket(AF_INET, SOCK_STREAM, 0);
   if (socket_desc == -1)
   {
-    perror("Socket: ");
+    syslog(LOG_ERR, "Socket failure");
     exit(EXIT_FAILURE);
   }
 
@@ -49,7 +62,7 @@ int main(int argc , char *argv[])
 
   if (setsockopt(socket_desc, SOL_SOCKET, SO_REUSEADDR, &server, sizeof(server)) == -1)
   {
-    perror("setsockopt (SO_REUSEADDR): ");
+    syslog(LOG_ERR, "setsockopt (SO_REUSEADDR)");
     close(socket_desc);
     exit(EXIT_FAILURE);
   }
@@ -57,33 +70,32 @@ int main(int argc , char *argv[])
   // IP_TRANSPARENT setzen, damit auch connections zu nicht lokalen IP adressen akzeptiert werden
   if (setsockopt(socket_desc, SOL_IP, IP_TRANSPARENT, &server, sizeof(server)) == -1)
   {
-    perror("setsockopt (IP_TRANSPARENT): ");
+    syslog(LOG_ERR, "setsockopt (IP_TRANSPARENT)");
     close(socket_desc);
     exit(EXIT_FAILURE);
   }
 
   if( bind(socket_desc,(struct sockaddr *)&server , sizeof(server)) < 0)
   {
-    perror("bind failed: ");
+    syslog(LOG_ERR, "Bind failed");
     close(socket_desc);
     exit(EXIT_FAILURE);
   }
 
   listen(socket_desc, 3);
-
-  printf("Listen on Port: %i\r\n", PROXYPORT);
+  syslog(LOG_NOTICE,"Listen on Port %i",PROXYPORT);
 
   c = sizeof(struct sockaddr_in);
   while((new_socket = accept(socket_desc, (struct sockaddr *)&client, (socklen_t*)&c))) // Verbindung akzeptieren
   {
     //original ip auslesen
     get_org_dstaddr(new_socket, &orig_dst);
-    printf("Connection accepted to destination: %s\r\n", orig_dst_str);
+    syslog(LOG_NOTICE, "Connection accepted to destination %s", orig_dst_str);
     // socket für connection zu original ziel
     proxysocket = socket(AF_INET , SOCK_STREAM , 0);
     if (proxysocket == -1)
     {
-      perror("Proxy Client Socket: ");
+      syslog(LOG_ERR, "proxysocket error");
       exit(EXIT_FAILURE);
     }
     proxyclient.sin_addr.s_addr = inet_addr(orig_dst_str);
@@ -95,7 +107,6 @@ int main(int argc , char *argv[])
     {
       perror("connect failed: "); exit(EXIT_FAILURE);
     }
-    printf("Connected to: %s\r\n", orig_dst_str);
 
     message[0] = '\0';
 
@@ -112,14 +123,13 @@ int main(int argc , char *argv[])
 
     if( r<0 )
     {
-      puts("fehler");
+      //ERROR
       exit(EXIT_FAILURE);
     }
 
     if( r==0 )
     {
         // Timeout
-        puts("timeout");
     }
 
     if( r>0 )
@@ -129,49 +139,36 @@ int main(int argc , char *argv[])
       {
         if (i==0)
         {
-          puts("disconnected");
           close(proxysocket);
           break;
         }
 
         teardown = strstr(message,"TEARDOWN");
-
-        puts("get message from tvbox:");
-
         message[i] = '\0';
-        puts(message);
-
         stringReplace(oldip, newip, message); // interne durch öffentliche ip ersetzen
 
         if(send(proxysocket, message, strlen(message), 0) < 0) //zum orignal ziel senden
         {
-          puts("fehler"); close(proxysocket); break;
+          close(proxysocket); break;
         }
 
-        printf("Send message to dst server: \r\n%s\r\n", message);
-
         message[0] = '\0';
-        puts("get message from dst server:");
 
         if (recv(proxysocket, message, sizeof(message),0) < 0) //antwort vom ziel empfangen
         {
-          puts("disconnected");
           close(proxysocket);
           break;
         }
 
-        puts(message);
-
         if(send(new_socket, message, strlen(message), 0) < 0) //zur tv box zurück senden
         {
-          puts("fehler"); close(proxysocket); break;
+          close(proxysocket); break;
         }
-        puts("send message to tv box: ");
-        puts(message);
+
         message[0] = '\0';
         if(teardown != NULL)
         {
-          puts("TEARDOWN, shutting down");
+          syslog(LOG_NOTICE, "teardown");
           break;
         }
         teardown = NULL;
@@ -208,6 +205,7 @@ int get_org_dstaddr(int sockfd, struct sockaddr_storage *orig_dst)
         inet_ntop(AF_INET, &(((struct sockaddr_in*) orig_dst)->sin_addr), orig_dst_str, INET_ADDRSTRLEN);
       }
     }
+    closelog();
     return 0;
 }
 
@@ -248,4 +246,52 @@ char * stringReplace(char *search, char *replace, char *string)
   free(tempString);
 
   return string;
+}
+
+static sighandler_t handle_signal(int sig_nr, sighandler_t signalhandler)
+{
+  struct sigaction neu_sig, alt_sig;
+  neu_sig.sa_handler = signalhandler;
+  sigemptyset(&neu_sig.sa_mask);
+  neu_sig.sa_flags = SA_RESTART;
+  if (sigaction(sig_nr, &neu_sig, &alt_sig) < 0)
+  {
+    return SIG_ERR;
+  }
+  return alt_sig.sa_handler;
+}
+
+static void start_daemon(const char *log_name, int facility)
+{
+  int i;
+  pid_t pid;
+
+  if ((pid = fork()) != 0)
+  {
+    exit(EXIT_FAILURE);
+  }
+
+  if (setsid() < 0)
+  {
+    printf("%s kann nicht Sessionführer werden!\n", log_name);
+    exit(EXIT_FAILURE);
+  }
+
+  handle_signal(SIGHUP, SIG_IGN);
+
+  if ((pid = fork()) != 0)
+  {
+    exit(EXIT_FAILURE);
+  }
+
+  chdir("/");
+
+  // bitmakse auf 0, damit init sich dem kindprozess annimmt
+  umask(0);
+  // schliessen aller fd's
+  for (i = sysconf(_SC_OPEN_MAX); i > 0; i--)
+  {
+    close(i);
+  }
+  openlog(log_name, LOG_PID | LOG_CONS | LOG_NDELAY, facility);
 }
