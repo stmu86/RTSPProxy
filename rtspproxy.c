@@ -20,7 +20,7 @@ für IP_TRANSPARENT siehe https://www.kernel.org/doc/Documentation/networking/tp
 #include <sys/stat.h>
 #include <signal.h>
 
-#define BANNER "RTSPProxy Daemon 0.2 alpha1"
+#define BANNER "RTSPProxy Daemon 0.1 alpha2"
 #define BACKLOG 10
 #define PROXYPORT 5540
 #define IP_TRANSPARENT 19
@@ -28,31 +28,42 @@ für IP_TRANSPARENT siehe https://www.kernel.org/doc/Documentation/networking/tp
 
 char orig_dst_str[INET_ADDRSTRLEN]; //Originale Ziel IP
 typedef void (*sighandler_t)(int);
-int debug = 0;
+int debug_output = -1;
 
 int get_org_dstaddr(int sockfd, struct sockaddr_storage *orig_dst);
 char * stringReplace(char *search, char *replace, char *string);
 static sighandler_t handle_signal(int sig_nr, sighandler_t signalhandler);
 static void start_daemon(const char *log_name, int facility);
+int logging(int type, char *msg);
 
 int main(int argc , char *argv[])
 {
   int socket_desc, new_socket, c, i, proxysocket;
   struct sockaddr_in server, client, proxyclient;
   struct sockaddr_storage orig_dst;
-  char message[BUFFER];
+  char message[BUFFER], tmpstr[6];
   char *teardown;
   char oldip[] = "10.1.1.32"; // zu ersetzende interne IP
   char newip[] = "109.205.200.75"; // öffentliche IP
-
-  start_daemon("RTSPProxy", LOG_LOCAL0);
-
-  syslog(LOG_NOTICE, "%s started (written by Stefan Mueller)", BANNER);
+  char log_msg[255] = BANNER;
+//parameter --debug für output auf die konsole (kein daemon)
+  if (argc == 2 && strstr(argv[1], "--debug"))
+  {
+    debug_output = 1;
+    strcat(log_msg, " DEBUG MODE");
+  }
+  else
+  {
+    start_daemon("RTSPProxy", LOG_LOCAL0);
+  }
+  strcat(log_msg, " started (written by Stefan Mueller)");
+  logging(1, log_msg);
+  log_msg[0] = '\0';
 
   socket_desc = socket(AF_INET, SOCK_STREAM, 0);
   if (socket_desc == -1)
   {
-    syslog(LOG_ERR, "Socket failure");
+    logging(2, "Socket failed");
     exit(EXIT_FAILURE);
   }
 
@@ -62,7 +73,7 @@ int main(int argc , char *argv[])
 
   if (setsockopt(socket_desc, SOL_SOCKET, SO_REUSEADDR, &server, sizeof(server)) == -1)
   {
-    syslog(LOG_ERR, "setsockopt (SO_REUSEADDR)");
+    logging(2, "setsockopt (SO_REUSEADDR)");
     close(socket_desc);
     exit(EXIT_FAILURE);
   }
@@ -70,32 +81,39 @@ int main(int argc , char *argv[])
   // IP_TRANSPARENT setzen, damit auch connections zu nicht lokalen IP adressen akzeptiert werden
   if (setsockopt(socket_desc, SOL_IP, IP_TRANSPARENT, &server, sizeof(server)) == -1)
   {
-    syslog(LOG_ERR, "setsockopt (IP_TRANSPARENT)");
+    logging(2, "setsockopt (IP_TRANSPARENT)");
     close(socket_desc);
     exit(EXIT_FAILURE);
   }
 
-  if( bind(socket_desc,(struct sockaddr *)&server , sizeof(server)) < 0)
+  if (bind(socket_desc,(struct sockaddr *)&server , sizeof(server)) < 0)
   {
-    syslog(LOG_ERR, "Bind failed");
+    logging(2, "Bind failed");
     close(socket_desc);
     exit(EXIT_FAILURE);
   }
 
   listen(socket_desc, 3);
-  syslog(LOG_NOTICE,"Listen on Port %i",PROXYPORT);
-
+  strcat(log_msg, "Listen on port: ");
+  sprintf(tmpstr, "%d", PROXYPORT);
+  strcat(log_msg, tmpstr);
+  logging(1, log_msg);
+  log_msg[0] = '\0';
   c = sizeof(struct sockaddr_in);
   while((new_socket = accept(socket_desc, (struct sockaddr *)&client, (socklen_t*)&c))) // Verbindung akzeptieren
   {
     //original ip auslesen
     get_org_dstaddr(new_socket, &orig_dst);
-    syslog(LOG_NOTICE, "Connection accepted to destination %s", orig_dst_str);
+    strcat(log_msg, "Connection accepted to destination ");
+    strcat(log_msg, orig_dst_str);
+    logging(1, log_msg);
+    log_msg[0] = '\0';
+
     // socket für connection zu original ziel
     proxysocket = socket(AF_INET , SOCK_STREAM , 0);
     if (proxysocket == -1)
     {
-      syslog(LOG_ERR, "proxysocket error");
+      logging(2, "proxysocket error");
       exit(EXIT_FAILURE);
     }
     proxyclient.sin_addr.s_addr = inet_addr(orig_dst_str);
@@ -103,9 +121,9 @@ int main(int argc , char *argv[])
     proxyclient.sin_port = htons(554);
 
     // zu original ziel connecten
-    if(connect(proxysocket, (struct sockaddr *)&proxyclient, sizeof(proxyclient)))
+    if (connect(proxysocket, (struct sockaddr *)&proxyclient, sizeof(proxyclient)))
     {
-      perror("connect failed: "); exit(EXIT_FAILURE);
+      logging(2, "connect failed: "); exit(EXIT_FAILURE);
     }
 
     message[0] = '\0';
@@ -121,18 +139,18 @@ int main(int argc , char *argv[])
 
     int r=select(new_socket+1, &read_set, NULL, NULL, &timeout);
 
-    if( r<0 )
+    if (r<0)
     {
       //ERROR
       exit(EXIT_FAILURE);
     }
 
-    if( r==0 )
+    if (r==0)
     {
         // Timeout
     }
 
-    if( r>0 )
+    if (r>0)
     {
       // ready zum lesen
       while(i = recv(new_socket, message, sizeof(message),0)) //empfangen
@@ -145,8 +163,11 @@ int main(int argc , char *argv[])
 
         teardown = strstr(message,"TEARDOWN");
         message[i] = '\0';
+        logging(0, "Get from source:");
+        logging(0, message);
         stringReplace(oldip, newip, message); // interne durch öffentliche ip ersetzen
-
+        logging(0, "Send to destination:");
+        logging(0, message);
         if(send(proxysocket, message, strlen(message), 0) < 0) //zum orignal ziel senden
         {
           close(proxysocket); break;
@@ -159,16 +180,20 @@ int main(int argc , char *argv[])
           close(proxysocket);
           break;
         }
-
+        logging(0, "Get from destination:");
+        logging(0, message);
         if(send(new_socket, message, strlen(message), 0) < 0) //zur tv box zurück senden
         {
           close(proxysocket); break;
         }
 
+        logging(0, "Send to sourcee:");
+        logging(0, message);
         message[0] = '\0';
+
         if(teardown != NULL)
         {
-          syslog(LOG_NOTICE, "teardown");
+          logging(1, "teardown");
           break;
         }
         teardown = NULL;
@@ -179,6 +204,7 @@ int main(int argc , char *argv[])
   }
 
   close(new_socket);
+  closelog();
   return 0;
 }
 
@@ -187,10 +213,6 @@ int get_org_dstaddr(int sockfd, struct sockaddr_storage *orig_dst)
 {
     socklen_t addrlen = sizeof(*orig_dst);
     memset(orig_dst, 0, addrlen);
-
-    //For UDP transparent proxying:
-    //Set IP_RECVORIGDSTADDR socket option for getting the original
-    //destination of a datagram
 
     //Socket is bound to original destination
     if(getsockname(sockfd, (struct sockaddr*) orig_dst, &addrlen) < 0)
@@ -205,7 +227,6 @@ int get_org_dstaddr(int sockfd, struct sockaddr_storage *orig_dst)
         inet_ntop(AF_INET, &(((struct sockaddr_in*) orig_dst)->sin_addr), orig_dst_str, INET_ADDRSTRLEN);
       }
     }
-    closelog();
     return 0;
 }
 
@@ -228,21 +249,16 @@ char * stringReplace(char *search, char *replace, char *string)
     return NULL;
   }
 
-  // temporaere Kopie anlegen
   strcpy(tempString, string);
 
-  // ersten Abschnitt in String setzen
   len = searchStart - string;
   string[len] = '\0';
 
-  // zweiten Abschnitt anhaengen
   strcat(string, replace);
 
-  // dritten Abschnitt anhaengen
   len += strlen(search);
   strcat(string, (char*)tempString+len);
 
-  // Speicher freigeben
   free(tempString);
 
   return string;
@@ -294,4 +310,30 @@ static void start_daemon(const char *log_name, int facility)
     close(i);
   }
   openlog(log_name, LOG_PID | LOG_CONS | LOG_NDELAY, facility);
+}
+
+int logging(int type, char *msg)
+{
+    if ((type == 0) && (debug_output == 1))
+    {
+      printf("%s\r\n", msg);
+    }
+
+    if (type == 1)
+    {
+      if (debug_output == 1)
+      {
+        printf("%s\r\n", msg);
+      }
+      syslog(LOG_NOTICE, "%s", msg);
+    }
+    if (type == 2)
+    {
+      if (debug_output == 1)
+      {
+        printf("%s\r\n", msg);
+      }
+      syslog(LOG_ERR, "%s", msg);
+    }
+  return 0;
 }
