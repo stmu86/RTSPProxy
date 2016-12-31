@@ -13,6 +13,11 @@ TODO:
 
 last changes:
 
+add --debug for console output
+
 fork to deaemon
+
 add syslog
+
 add teardown
+
