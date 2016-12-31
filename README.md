@@ -10,3 +10,9 @@ please see https://www.kernel.org/doc/Documentation/networking/tproxy.txt to get
 TODO:
 
 -signaling, errorhandling, fork() multiconnections, connection handling........
+
+last changes:
+
+fork to deaemon
+add syslog
+add teardown
