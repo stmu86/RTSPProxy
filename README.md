@@ -9,6 +9,8 @@ please see https://www.kernel.org/doc/Documentation/networking/tproxy.txt to get
 
 TODO:
 
+-use select() to make read / writes on sockets better
+
 -signaling, errorhandling, fork() multiconnections, connection handling........
 
 last changes:
